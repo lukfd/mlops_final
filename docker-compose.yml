@@ -48,7 +48,7 @@ services:
   localstack:
     image: localstack/localstack:3.8
     environment:
-      - SERVICES=s3
+      - SERVICES=s3,sqs
       - AWS_DEFAULT_REGION=us-east-1
       - DEBUG=0
     ports:

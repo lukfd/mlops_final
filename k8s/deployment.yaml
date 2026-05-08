@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-consumer
+  labels:
+    app: inference-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-consumer
+  template:
+    metadata:
+      labels:
+        app: inference-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: inference-consumer:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: S3_ENDPOINT_URL
+              value: "http://localstack:4566"
+            - name: SQS_ENDPOINT_URL
+              value: "http://localstack:4566"
+            - name: S3_BUCKET
+              value: "lab4-model-training"
+            - name: SQS_QUEUE_NAME
+              value: "inference-queue"
+            - name: AWS_ACCESS_KEY_ID
+              value: "test"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "test"
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

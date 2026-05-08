@@ -119,27 +119,24 @@ After the run of the DAG, the FastAPI application showed successfully the openap
 
 ![model info page screenshot](info.png)
 
-# Short Answers
+# Final Project Short Answers
 
-1. What problems existed in the original lab system?
+1. **Describe your system end-to-end.**
 
-- No evaluation since any model, good or bad, was immediately saved as production
-- No promotion step since train equals deploy, and there is no quality gate
-- No versioning since every run overwrote iris_model.pkl
-- No remote storage since artifacts were local only
+   The system has two flows. In the **training flow**, an Airflow DAG (`ml_training_pipeline_v2`) loads the breast cancer dataset, splits it into train/test sets, trains a logistic regression classifier, evaluates it against a 0.94 accuracy threshold, and—if it passes—promotes the model by uploading versioned artifacts (`cancer.pkl`, `metrics.json`, `metadata.json`) and a `promoted_model.json` pointer to S3 (LocalStack). In the **inference flow**, a second Airflow DAG (`sqs_populate_inference_queue`) reads the same test split and sends one SQS message per record with a `record_id` and feature array. One or more Kubernetes consumer pods poll the SQS queue, load the promoted model from S3 on startup, run `model.predict()` on each message, write the result as `predictions/<record_id>.json` to S3, and delete the message only after a successful write.
 
-2. Why is storing models locally dangerous in production systems?
+2. **Why is a queue used instead of direct API calls?**
 
-There is a lack of decoupling. A container restart, disk failure, or new deployment wipes the file. Multiple API instances can't share a local file. There's no audit trail when it gets overwritten.
+   A queue decouples producers from consumers. The Airflow DAG can finish pushing all 113 test records instantly without waiting for any inference to complete. Consumers process at their own pace, and if they lag behind or crash, messages stay in the queue rather than being lost. A direct API call would require the caller to wait for a synchronous response, block on consumer availability, and implement its own retry logic for failures.
 
-3. Why do we add evaluation before promoting a model?
+3. **What happens if a consumer crashes mid-processing?**
 
-Training always produces a model, although it will not necessarily be a good one. The evaluation gate prevents a degraded model from reaching production; if evaluation fails, the pipeline halts and the current production model stays untouched.
+   Each SQS message has a visibility timeout. When a consumer receives a message, SQS hides it from other consumers for that duration. If the consumer crashes before calling `delete_message`, the visibility timeout expires and the message reappears in the queue for another consumer to pick up. Because we only call `delete_message` after both the inference and the S3 write succeed, a mid-processing crash results in the message being retried—guaranteeing at-least-once delivery without losing any record.
 
-4. Why do we need model versioning?
+4. **Where are the bottlenecks in your system?**
 
-So we can roll back when a new model regresses, trace exactly what was serving during an incident, and enable A/B testing. Without versions, every promotion silently destroys the previous artifact.
+   The primary bottleneck is the consumer's sequential per-message processing loop: receive → predict → write to S3 → delete. S3 `put_object` adds network round-trip latency for every record. A secondary bottleneck is model loading: each consumer pod downloads the model from S3 once at startup, so cold-start time scales with model file size. The SQS queue itself is unlikely to be a bottleneck for this workload; the queue simply accumulates work that consumers drain at their own rate.
 
-5. Why might managing models manually become diffi cult as the number of models grows?
+5. **One improvement you would make for production.**
 
-It's manageable with 2 models. With 20+ models however, we lose track of what's current vs under evaluation vs failed. Each model's thresholds and paths diverge. Deployments require manual coordination, and there's no single source of truth. Therefore, we need a proper model registry.
+   Replace the ad-hoc `promoted_model.json` pointer with a proper model registry (e.g., MLflow). A registry provides a central API for versioning, stage transitions (staging → production), lineage tracking, and rollback. It removes the fragile convention of hand-crafting JSON pointers in S3 and makes it safe to run multiple model types and versions simultaneously without path collisions.
