@@ -10,3 +10,4 @@ models
 plugins
 .DS_Store
 .vscode
+kubeconfig.yaml

@@ -20,9 +20,9 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: S3_ENDPOINT_URL
-              value: "http://localstack:4566"
+              value: "http://172.18.0.1:4566"
             - name: SQS_ENDPOINT_URL
-              value: "http://localstack:4566"
+              value: "http://172.18.0.1:4566"
             - name: S3_BUCKET
               value: "lab4-model-training"
             - name: SQS_QUEUE_NAME

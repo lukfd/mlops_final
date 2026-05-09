@@ -7,11 +7,16 @@ services:
       dockerfile: Dockerfile.airflow
     environment:
       AIRFLOW_SKIP_DB_INIT: "0"
+      KUBECONFIG: /opt/project/kubeconfig.yaml
+      S3_ENDPOINT_URL: http://localstack:4566
+      SQS_ENDPOINT_URL: http://localstack:4566
     working_dir: /opt/project
     volumes:
       - .:/opt/project
     ports:
       - "8080:8080"
+    networks:
+      - ai-pipeline-net
     entrypoint: /bin/bash
     command:
       - -lc
@@ -35,9 +40,14 @@ services:
       - airflow-webserver
     environment:
       AIRFLOW_SKIP_DB_INIT: "1"
+      KUBECONFIG: /opt/project/kubeconfig.yaml
+      S3_ENDPOINT_URL: http://localstack:4566
+      SQS_ENDPOINT_URL: http://localstack:4566
     working_dir: /opt/project
     volumes:
       - .:/opt/project
+    networks:
+      - ai-pipeline-net
     entrypoint: /bin/bash
     command:
       - -lc
@@ -53,6 +63,44 @@ services:
       - DEBUG=0
     ports:
       - 4566:4566
+    volumes:
+      - ./scripts/localstack_init.sh:/etc/localstack/init/ready.d/01-init-resources.sh
+    networks:
+      - ai-pipeline-net
+
+  docker-host:
+    image: docker:24.0-dind
+    privileged: true
+    volumes:
+      - .:/opt/project
+    networks:
+      ai-pipeline-net:
+        aliases:
+          - docker-host
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+
+  kind-provisioner:
+    image: alpine/k8s:1.29.0
+    depends_on:
+      - docker-host
+    volumes:
+      - .:/opt/project
+    environment:
+      - DOCKER_HOST=tcp://docker-host:2375
+    command: >
+          sh -c "apk add --no-cache docker-cli curl >/dev/null;
+            arch=$$(uname -m); if [ \"$$arch\" = \"x86_64\" ]; then kind_arch=amd64; else kind_arch=arm64; fi;
+            curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-$${kind_arch};
+            chmod +x /usr/local/bin/kind;
+            until docker info >/dev/null 2>&1; do echo 'Waiting for docker-host daemon...'; sleep 2; done;
+            kind delete cluster --name ai-cluster || true;
+            kind create cluster --name ai-cluster --kubeconfig /opt/project/kubeconfig.yaml --config /opt/project/kind-config.yaml;
+            sed -i 's|server: https://.*|server: https://docker-host:6443|g' /opt/project/kubeconfig.yaml;
+            until kubectl --kubeconfig /opt/project/kubeconfig.yaml apply --validate=false -f /opt/project/k8s/localstack-externalname.yaml; do sleep 2; done;
+            tail -f /dev/null"
+    networks:
+      - ai-pipeline-net
 
   fast-api:
     build:
@@ -65,3 +113,9 @@ services:
       - ./models:/opt/project/models
     working_dir: /opt/project
     command: python scripts/serve_api.py --host 0.0.0.0 --port 8000
+    networks:
+      - ai-pipeline-net
+
+networks:
+  ai-pipeline-net:
+    driver: bridge

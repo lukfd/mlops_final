@@ -54,6 +54,26 @@ def load_metadata_from_s3(bucket_name: str = "lab4-model-training", model_name: 
             detail=f"Failed to load metadata from S3: {str(e)}"
         )
 
+
+def load_recent_predictions(
+    bucket_name: str = "lab4-model-training",
+    prefix: str = "predictions/",
+    limit: int = 10,
+):
+    s3_client = get_s3_client()
+    response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+    contents = response.get("Contents", [])
+    if not contents:
+        return []
+
+    sorted_items = sorted(contents, key=lambda item: item["LastModified"], reverse=True)
+    results = []
+    for item in sorted_items[:limit]:
+        key = item["Key"]
+        obj = s3_client.get_object(Bucket=bucket_name, Key=key)
+        results.append(json.loads(obj["Body"].read()))
+    return results
+
 def create_app(model_path: str = "models/iris_model.pkl"):
     """
     Creates a FastAPI app that serves predictions for the Iris model.
@@ -102,6 +122,14 @@ def create_app(model_path: str = "models/iris_model.pkl"):
     def get_model_info(model_name: str = "cancer"):
         metadata = load_metadata_from_s3(model_name=model_name)
         return metadata
+
+    @app.get("/predictions")
+    def get_predictions(limit: int = 10):
+        predictions = load_recent_predictions(limit=limit)
+        return {
+            "count": len(predictions),
+            "items": predictions,
+        }
 
     # return the FastAPI app
     return app
