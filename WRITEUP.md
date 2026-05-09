@@ -80,11 +80,11 @@ As the consumers poll SQS, they load the promoted model from S3 on startup, perf
 
 # Results
 
-We successfuly ran the entire pipeline locally, and we are sure that we can port these results into AWS or any other cloud provider.
+We successfully ran the entire pipeline locally, and we are sure that we can port these results into AWS or any other cloud provider.
 
 Like described in the previous "Steps" section, we ran the `make up`. We then ran the `ml_training_pipeline_v2` DAG in Airflow.
 
-Then we created all resources in kubernetes
+Then we created all resources in Kubernetes.
 ```
 @mlops_final $ make kind-build-consumer
 docker compose -f docker-compose.yml exec -T docker-host \
@@ -131,13 +131,13 @@ NAME         TYPE           CLUSTER-IP   EXTERNAL-IP                  PORT(S)   
 localstack   ExternalName   <none>       localstack.ai-pipeline-net   <none>    21m
 ```
 
-Then we ran the `sqs_populate_inference_queue` DAG which kicked off the inferences by sending new messages to SQS so that the kubernetes consumer could picked them up.
+Then we ran the `sqs_populate_inference_queue` DAG which kicked off the inferences by sending new messages to SQS so that the Kubernetes consumer could pick them up.
 
 ```bash
 docker compose exec airflow-webserver kubectl --kubeconfig /opt/project/kubeconfig.yaml logs -l app=inference-consumer --tail=100
 ```
 
-No real messages were created in the pod, be we then created a `POST /predictions` api endpoint to retreive the predictions generated that were uploaded to S3.
+We then created a `GET /predictions` API endpoint to retrieve the predictions generated that were uploaded to S3.
 
 ```json
 {
@@ -207,20 +207,24 @@ No real messages were created in the pod, be we then created a `POST /prediction
 
 1. **Describe your system end-to-end.**
 
-The system has two flows. In the **training flow**, an Airflow DAG (`ml_training_pipeline_v2`) loads the breast cancer dataset, splits it into train/test sets, trains a logistic regression classifier, evaluates it against a 0.94 accuracy threshold, and—if it passes—promotes the model by uploading versioned artifacts (`cancer.pkl`, `metrics.json`, `metadata.json`) and a `promoted_model.json` pointer to S3 (LocalStack). In the **inference flow**, a second Airflow DAG (`sqs_populate_inference_queue`) reads the same test split and sends one SQS message per record with a `record_id` and feature array. One or more Kubernetes consumer pods poll the SQS queue, load the promoted model from S3 on startup, run `model.predict()` on each message, write the result as `predictions/<record_id>.json` to S3, and delete the message only after a successful write.
+As described before, the **training flow** uses the Airflow DAG `ml_training_pipeline_v2` which loads the breast cancer dataset, splits it into train/test sets, trains a logistic regression classifier, evaluates it and if a 0.94 accuracy threshold passes, the DAG promotes the model by uploading versioned artifacts (`cancer.pkl`, `metrics.json`, `metadata.json`) and a `promoted_model.json` pointer to S3, which in our case it is a LocalStack for mocking purposes. 
+
+The **inference flow** uses a second Airflow DAG called `sqs_populate_inference_queue`. The DAG reads the same test split and sends one SQS message per record with a `record_id` and feature array. We have a running Kubernetes cluster deployed using KinD. One or more Kubernetes consumer pods poll the SQS queue, load the promoted model from S3 on startup, run `model.predict()` on each message, write the result as `predictions/<record_id>.json` to S3, and delete the message only after a successful write.
 
 2. **Why is a queue used instead of direct API calls?**
 
-A queue decouples producers from consumers. The Airflow DAG can finish pushing all 113 test records instantly without waiting for any inference to complete. Consumers process at their own pace, and if they lag behind or crash, messages stay in the queue rather than being lost. A direct API call would require the caller to wait for a synchronous response, block on consumer availability, and implement its own retry logic for failures.
+Using a queue helps us decouple the producers from the inference consumers. The Airflow DAG can push all test records instantly without waiting for any inference to complete. This is a better approach so that if a failure for a single inference were to happen, it does not make the rest of the record fail as well. Consumers can be scaled depending on the incoming requests, and if they lag behind or crash, messages stay in the queue rather than being lost. Another advantage of using the queue is that it is an asynchronous call, while a direct API call would require the caller to wait for a synchronous response, block on consumer availability, and implement its own retry logic for failures.
 
 3. **What happens if a consumer crashes mid-processing?**
 
-Each SQS message has a visibility timeout. When a consumer receives a message, SQS hides it from other consumers for that duration. If the consumer crashes before calling `delete_message`, the visibility timeout expires and the message reappears in the queue for another consumer to pick up. Because we only call `delete_message` after both the inference and the S3 write succeed, a mid-processing crash results in the message being retried—guaranteeing at-least-once delivery without losing any record.
+When a consumer receives a message, SQS hides it from other consumers for that duration. If the consumer crashes before calling `delete_message`, the visibility timeout expires and the message reappears in the queue for another consumer to pick up. Because we only call `delete_message` after both the inference and the S3 write succeed, a mid-processing crash results in the message being retried without losing any record. If we configure an SQS Dead Letter Queue, messages that repeatedly fail can be moved there for manual inspection.
 
 4. **Where are the bottlenecks in your system?**
 
-The primary bottleneck is the consumer's sequential per-message processing loop: receive → predict → write to S3 → delete. S3 `put_object` adds network round-trip latency for every record. A secondary bottleneck is model loading: each consumer pod downloads the model from S3 once at startup, so cold-start time scales with model file size. The SQS queue itself is unlikely to be a bottleneck for this workload; the queue simply accumulates work that consumers drain at their own rate.
+The bottlenecks in the system are the write of the inference result to S3 (network round trips per record), and the cold-start time because each pod downloads the model at startup. A configured SQS Dead Letter Queue would help surface repeated failures for manual inspection.
 
 5. **One improvement you would make for production.**
 
-Replace the ad-hoc `promoted_model.json` pointer with a proper model registry (e.g., MLflow). A registry provides a central API for versioning, stage transitions (staging → production), lineage tracking, and rollback. It removes the fragile convention of hand-crafting JSON pointers in S3 and makes it safe to run multiple model types and versions simultaneously without path collisions.
+One thought we had was to improve the model promotion and use a model registry instead of having a `promoted_model.json` pointer. A registry would provide a central API for versioning, stage transitions, lineage tracking, and rollbacks.
+
+Another improvement would be the implementation of a SQS Dead Letter Queue to make sure that failed inferences can be recovered and tracked down manually or implement a fallback pipeline.
